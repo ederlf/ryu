@@ -22,7 +22,6 @@ from ryu import exception
 from ryu.lib import mac
 from . import ofproto_parser
 from . import ofproto_v1_0
-from . import ether
 from . import inet
 
 import logging
@@ -57,6 +56,7 @@ MF_PACK_STRING_BE32 = '!I'
 MF_PACK_STRING_BE16 = '!H'
 MF_PACK_STRING_8 = '!B'
 MF_PACK_STRING_MAC = '!6s'
+MF_PACK_STRING_IPV6 = '!8H'
 
 _MF_FIELDS = {}
 
@@ -336,23 +336,21 @@ class ClsRule(object):
         if self.flow.nw_proto != 0:
             wildcards &= ~ofproto_v1_0.OFPFW_NW_PROTO
 
-        if self.flow.nw_src != 0:
+        if self.wc.nw_src_mask != 0 and "01" not in bin(self.wc.nw_src_mask):
             wildcards &= ~ofproto_v1_0.OFPFW_NW_SRC_MASK
-            # maximum size of 32 to prevent changes on other bits
-            wildcards |= (self.wc.nw_src_mask % 32) << 8
+            maskbits = (bin(self.wc.nw_src_mask).count("0") - 1)
+            wildcards |= (maskbits << ofproto_v1_0.OFPFW_NW_SRC_SHIFT)
 
-        if self.flow.nw_dst != 0:
+        if self.wc.nw_dst_mask != 0 and "01" not in bin(self.wc.nw_dst_mask):
             wildcards &= ~ofproto_v1_0.OFPFW_NW_DST_MASK
-            # maximum size of 32 to prevent changes on other bits
-            wildcards |= (self.wc.nw_dst_mask % 32) << 14
+            maskbits = (bin(self.wc.nw_dst_mask).count("0") - 1)
+            wildcards |= (maskbits << ofproto_v1_0.OFPFW_NW_DST_SHIFT)
 
         if self.flow.tp_src != 0:
             wildcards &= ~ofproto_v1_0.OFPFW_TP_SRC
 
         if self.flow.tp_dst != 0:
             wildcards &= ~ofproto_v1_0.OFPFW_TP_DST
-
-        #FIXME: add support for arp, icmp, etc
 
         return (wildcards, self.flow.in_port, self.flow.dl_src,
                 self.flow.dl_dst, self.flow.dl_vlan, self.flow.dl_vlan_pcp,
@@ -615,6 +613,7 @@ class MFIPSrc(MFField):
     def __init__(self, header, value, mask=None):
         super(MFIPSrc, self).__init__(header, MFIPSrc.pack_str)
         self.value = value
+        self.mask = mask
 
     @classmethod
     def make(cls, header):
@@ -634,6 +633,7 @@ class MFIPDst(MFField):
     def __init__(self, header, value, mask=None):
         super(MFIPDst, self).__init__(header, MFIPDst.pack_str)
         self.value = value
+        self.mask = mask
 
     @classmethod
     def make(cls, header):
@@ -722,13 +722,35 @@ class MFArpSha(MFField):
         return self._put(buf, offset, rule.flow.arp_sha)
 
 
+class MFIPV6(object):
+    pack_str = MF_PACK_STRING_IPV6
+
+    @classmethod
+    def field_parser(cls, header, buf, offset):
+        hasmask = (header >> 8) & 1
+        if hasmask:
+            pack_string = '!' + cls.pack_str[1:] * 2
+            value = struct.unpack_from(pack_string, buf, offset + 4)
+            return cls(header, list(value[:8]), list(value[8:]))
+        else:
+            value = struct.unpack_from(cls.pack_str, buf, offset + 4)
+            return cls(header, list(value))
+
+
 @_register_make
 @_set_nxm_headers([ofproto_v1_0.NXM_NX_IPV6_SRC,
                    ofproto_v1_0.NXM_NX_IPV6_SRC_W])
-class MFIPV6Src(MFField):
+@MFField.register_field_header([ofproto_v1_0.NXM_NX_IPV6_SRC,
+                                ofproto_v1_0.NXM_NX_IPV6_SRC_W])
+class MFIPV6Src(MFIPV6, MFField):
+    def __init__(self, header, value, mask=None):
+        super(MFIPV6Src, self).__init__(header, MFIPV6Src.pack_str)
+        self.value = value
+        self.mask = mask
+
     @classmethod
     def make(cls, header):
-        return cls(header, '!4I')
+        return cls(header, cls.pack_str)
 
     def put(self, buf, offset, rule):
         return self.putv6(buf, offset,
@@ -739,10 +761,17 @@ class MFIPV6Src(MFField):
 @_register_make
 @_set_nxm_headers([ofproto_v1_0.NXM_NX_IPV6_DST,
                    ofproto_v1_0.NXM_NX_IPV6_DST_W])
-class MFIPV6Dst(MFField):
+@MFField.register_field_header([ofproto_v1_0.NXM_NX_IPV6_DST,
+                                ofproto_v1_0.NXM_NX_IPV6_DST_W])
+class MFIPV6Dst(MFIPV6, MFField):
+    def __init__(self, header, value, mask=None):
+        super(MFIPV6Dst, self).__init__(header, MFIPV6Dst.pack_str)
+        self.value = value
+        self.mask = mask
+
     @classmethod
     def make(cls, header):
-        return cls(header, '!4I')
+        return cls(header, cls.pack_str)
 
     def put(self, buf, offset, rule):
         return self.putv6(buf, offset,
